@@ -3,12 +3,22 @@
 /*
 This generates a graph reprensenting the network.
 
-Reaches are 
+To help debug, shorten all lines using
+
+SET session_replication_role = replica; -- disable triggers
+UPDATE qgep_od.reach SET progression_geometry = 
+  case
+    when st_geometrytype(ST_ForceCurve(ST_Line_Substring(ST_CurveToLine(progression_geometry), 0.1, 0.9))) = 'ST_CompoundCurve' then
+    ST_ForceCurve(ST_Line_Substring(ST_CurveToLine(progression_geometry), 0.1, 0.9))
+    else progression_geometry
+  end;
+SET session_replication_role = DEFAULT;
 */
+
 DROP TABLE IF EXISTS qgep_od.vw_network_node_simple CASCADE;
 CREATE TABLE qgep_od.vw_network_node_simple (
   id TEXT PRIMARY KEY,
-  geom geometry('GEOMETRY', 2056)
+  geom geometry('LINESTRING', 2056)
 );
 
 DROP TABLE IF EXISTS qgep_od.vw_network_edge_simple CASCADE;
@@ -29,10 +39,10 @@ BEGIN
   /* CORRECT ??? APPRAOCH : wastewaterelements are nodes (incl. reaches) */
   -- Add reaches and waswater_nodes (as nodes)
   INSERT INTO qgep_od.vw_network_node_simple (id, geom)
-  SELECT obj_id, ST_Force2D(situation_geometry)
+  SELECT obj_id, ST_Force2D(ST_MakeLine(situation_geometry, situation_geometry)) -- we reprsent points as lines with identical start and endpoint to have more homogeneous data
   FROM qgep_od.wastewater_node n
   UNION
-  SELECT obj_id, ST_LineSubstring(ST_CurveToLine(ST_Force2D(progression_geometry)), 0.1, 0.9)
+  SELECT obj_id, ST_CurveToLine(ST_Force2D(progression_geometry))
   FROM qgep_od.reach n;
 
   -- Connect the reaches FROMs (using edges)
@@ -49,7 +59,22 @@ BEGIN
 
   -- Update the edges geometry
   UPDATE qgep_od.vw_network_edge_simple e1
-  SET geom = ST_ShortestLine(n1.geom, n2.geom)
+  SET geom = 
+      -- segment, between the A's endpoint to closest point on B
+      ST_ShortestLine( 
+        ST_EndPoint(n1.geom),
+        n2.geom
+      )
+      -- segment from the closest point on B to B's endpoint
+      -- ST_Line_Substring(
+      --   n2.geom,
+      --   ST_LineLocatePoint(
+      --     n2.geom,
+      --     ST_EndPoint(n1.geom)
+      --   ),
+      --   1.0
+      -- )
+  
   FROM qgep_od.vw_network_edge_simple e2
   JOIN qgep_od.vw_network_node_simple n1 ON e2.node_from = n1.id
   JOIN qgep_od.vw_network_node_simple n2 ON e2.node_to = n2.id
