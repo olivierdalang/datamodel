@@ -8,6 +8,7 @@ Reaches are
 DROP TABLE IF EXISTS qgep_od.vw_network_node_simple CASCADE;
 CREATE TABLE qgep_od.vw_network_node_simple (
   id TEXT PRIMARY KEY,
+  node_type TEXT,
   geom geometry('POINT', 2056)
 );
 
@@ -37,11 +38,11 @@ BEGIN
 
   /* CORRECT ??? APPRAOCH : wastewaterelements are nodes (incl. reaches) */
   -- Add reaches and waswater_nodes (as nodes)
-  INSERT INTO qgep_od.vw_network_node_simple (id, geom)
-  SELECT obj_id, ST_Force2D(situation_geometry)
+  INSERT INTO qgep_od.vw_network_node_simple (id, node_type, geom)
+  SELECT obj_id, 'wastewater_node', ST_Force2D(situation_geometry)
   FROM qgep_od.wastewater_node n
   UNION
-  SELECT obj_id, ST_Line_Interpolate_Point(ST_CurveToLine(ST_Force2D(progression_geometry)), 0.5)
+  SELECT obj_id, 'reach', ST_Line_Interpolate_Point(ST_CurveToLine(ST_Force2D(progression_geometry)), 0.5)
   FROM qgep_od.reach n;
 
   -- Connect the reaches FROMs (using edges)
