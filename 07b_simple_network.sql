@@ -20,16 +20,6 @@ CREATE TABLE qgep_od.vw_network_edge_simple (
 );
 
 
-DROP VIEW IF EXISTS qgep_od.vw_network_view_simple;
-
-CREATE VIEW qgep_od.vw_network_view_simple AS (
-  SELECT e.id, ST_MakeLine(n1.geom, n2.geom)
-  FROM qgep_od.vw_network_edge_simple e
-  JOIN qgep_od.vw_network_node_simple n1 ON e.node_from = n1.id
-  JOIN qgep_od.vw_network_node_simple n2 ON e.node_to = n2.id
-);
-
-
 CREATE OR REPLACE FUNCTION qgep_od.refresh_network_simple() RETURNS void AS $body$
 BEGIN
   /* Empty the tables */
