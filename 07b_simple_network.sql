@@ -15,7 +15,8 @@ DROP TABLE IF EXISTS qgep_od.vw_network_edge_simple CASCADE;
 CREATE TABLE qgep_od.vw_network_edge_simple (
   id TEXT PRIMARY KEY,
   node_from TEXT REFERENCES qgep_od.vw_network_node_simple(id),
-  node_to TEXT REFERENCES qgep_od.vw_network_node_simple(id)
+  node_to TEXT REFERENCES qgep_od.vw_network_node_simple(id),
+  geom geometry('LINESTRING', 2056)
 );
 
 
@@ -56,6 +57,13 @@ BEGIN
   FROM qgep_od.reach_point rp
   JOIN qgep_od.reach r ON r.fk_reach_point_to = rp.obj_id;
 
+  -- Update the edges geometry
+  UPDATE qgep_od.vw_network_edge_simple e1
+  SET geom = ST_ShortestLine(n1.geom, n2.geom)
+  FROM qgep_od.vw_network_edge_simple e2
+  JOIN qgep_od.vw_network_node_simple n1 ON e2.node_from = n1.id
+  JOIN qgep_od.vw_network_node_simple n2 ON e2.node_to = n2.id
+  WHERE e1.id = e2.id;
 
   /* NAIVE APPROACH : reaches are edges
   -- Add reachpoints (as nodes)
