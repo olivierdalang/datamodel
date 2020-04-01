@@ -124,5 +124,3 @@ BEGIN
 END;
 $body$
 LANGUAGE plpgsql;
-
-SELECT qgep_od.refresh_network_simple();
