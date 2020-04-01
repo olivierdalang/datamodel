@@ -9,8 +9,8 @@ CREATE SCHEMA qgep_network;
 CREATE TABLE qgep_network.node (
   id SERIAL PRIMARY KEY,
   node_type TEXT,
-  ne_id TEXT NULL REFERENCES qgep_od.wastewater_networkelement(obj_id),
-  rp_id TEXT NULL REFERENCES qgep_od.reach_point(obj_id),
+  ne_id TEXT NULL REFERENCES qgep_od.wastewater_networkelement(obj_id), -- for reachpoints, this will reference the reach object
+  rp_id TEXT NULL REFERENCES qgep_od.reach_point(obj_id), -- will only be set for reachpoints
   geom geometry('POINT', 2056)
 );
 
@@ -18,6 +18,7 @@ CREATE TABLE qgep_network.segment (
   id SERIAL PRIMARY KEY,
   from_node INT REFERENCES qgep_network.node(id),
   to_node INT REFERENCES qgep_network.node(id),
+  ne_id TEXT NULL REFERENCES qgep_od.wastewater_networkelement(obj_id), -- will only be set for segments corresponding to reaches
   geom geometry('LINESTRING', 2056)
 );
 
@@ -30,7 +31,7 @@ BEGIN
   -- Insert nodes for wastewater nodes
   INSERT INTO qgep_network.node(node_type, ne_id, geom)    
   SELECT
-    'wastewater_node',
+    'wastewater node',
     n.obj_id,
     ST_Force2D(n.situation_geometry)
   FROM qgep_od.wastewater_node n;
@@ -46,9 +47,10 @@ BEGIN
   JOIN qgep_od.reach r ON rp.obj_id = r.fk_reach_point_from OR rp.obj_id = r.fk_reach_point_to;
 
   -- Insert virtual nodes for blind connections
+  -- INSERT INTO qgep_network.node(node_type, ne_id, description, geom)
   INSERT INTO qgep_network.node(node_type, ne_id, geom)
   SELECT DISTINCT
-    'virtual_node',
+    'blind connection',
     r.obj_id,
     ST_ClosestPoint(r.progression_geometry, rp.situation_geometry)
   FROM qgep_od.reach r
@@ -56,9 +58,10 @@ BEGIN
   WHERE ST_LineLocatePoint(ST_CurveToLine(r.progression_geometry), rp.situation_geometry) NOT IN (0.0, 1.0); -- if exactly at start or at end, we don't need a virtualnode as we have the reachpoint
 
   -- Insert reaches, subdivided according to blind reaches
-  INSERT INTO qgep_network.segment (from_node, to_node, geom)
+  INSERT INTO qgep_network.segment (from_node, to_node, ne_id, geom)
   SELECT sub2.node_id_1,
          sub2.node_id_2,
+         obj_id,
          ST_Line_Substring(
            ST_CurveToLine(ST_Force2D(progression_geometry)), ratio_1, ratio_2
          )
@@ -68,9 +71,10 @@ BEGIN
            sub1.node_id as node_id_2,
            sub1.progression_geometry,
            LAG(sub1.ratio) OVER (PARTITION BY sub1.obj_id ORDER BY sub1.ratio) as ratio_1,
-           sub1.ratio as ratio_2
+           sub1.ratio as ratio_2,
+           obj_id
     FROM (
-        -- This subquery joins node to reach, with "ratio" being the position of the node along the reach
+        -- This subquery joins blind node to reach, with "ratio" being the position of the node along the reach
         SELECT r.obj_id,
                r.progression_geometry,
                n.id as node_id,
@@ -121,6 +125,9 @@ BEGIN
   JOIN qgep_network.node as n2 ON n2.ne_id = wwne_id
   ORDER BY n1.id, ST_Distance(n1.geom, n2.geom);
 
+  REFRESH MATERIALIZED VIEW qgep_od.vw_network_node;
+  REFRESH MATERIALIZED VIEW qgep_od.vw_network_segment;
+
 END;
 $body$
 LANGUAGE plpgsql;
@@ -131,12 +138,22 @@ LANGUAGE plpgsql;
 DROP MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_node CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_segment CASCADE;
 
-CREATE VIEW qgep_od.vw_network_segment AS
+CREATE MATERIALIZED VIEW qgep_od.vw_network_segment AS
 SELECT s.id as gid,
-       s.geom AS progression_geometry
+       s.geom AS progression_geometry,
+       ne_id AS obj_id,
+       CASE WHEN ne_id IS NOT NULL THEN 'reach' ELSE 'connection' END AS type,
+       from_node AS from_obj_id,
+       to_node AS to_obj_id,
+       ST_Length(geom) AS length_calc
 FROM qgep_network.segment s;
 
-CREATE VIEW qgep_od.vw_network_node AS
+CREATE MATERIALIZED VIEW qgep_od.vw_network_node AS
 SELECT s.id as gid,
-       s.geom AS situation_geometry
-FROM qgep_network.node s;
+       COALESCE(rp_id, ne_id) as obj_id,
+       node_type as type,
+       s.geom AS situation_geometry,
+       COALESCE(rp.identifier, ne.identifier || CASE WHEN node_type = 'blind connection' THEN '-BC' ELSE '' END) AS description
+FROM qgep_network.node s
+LEFT JOIN qgep_od.reach_point rp ON rp_id = rp.obj_id
+LEFT JOIN qgep_od.wastewater_networkelement ne ON ne_id = ne.obj_id;
