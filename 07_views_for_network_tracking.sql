@@ -4,7 +4,6 @@
 This generates a graph reprensenting the network.
 */
 
-DROP TABLE IF EXISTS qgep_od.vw_network_node CASCADE;
 CREATE TABLE qgep_od.vw_network_node (
   id SERIAL PRIMARY KEY,
   node_type TEXT,
@@ -13,7 +12,6 @@ CREATE TABLE qgep_od.vw_network_node (
   geom geometry('POINT', 2056)
 );
 
-DROP TABLE IF EXISTS qgep_od.vw_network_segment CASCADE;
 CREATE TABLE qgep_od.vw_network_segment (
   id SERIAL PRIMARY KEY,
   from_node INT REFERENCES qgep_od.vw_network_node(id),
