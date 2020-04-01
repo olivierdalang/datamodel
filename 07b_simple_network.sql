@@ -6,7 +6,7 @@ This generates a graph reprensenting the network.
 To help debug, shorten all lines using
 
 SET session_replication_role = replica; -- disable triggers
-UPDATE qgep_od.reach SET progression_geometry = 
+UPDATE qgep_od.vw_qgep_reach SET progression_geometry = 
   case
     when st_geometrytype(ST_ForceCurve(ST_Line_Substring(ST_CurveToLine(progression_geometry), 0.1, 0.9))) = 'ST_CompoundCurve' then
     ST_ForceCurve(ST_Line_Substring(ST_CurveToLine(progression_geometry), 0.1, 0.9))
@@ -17,128 +17,124 @@ SET session_replication_role = DEFAULT;
 
 DROP TABLE IF EXISTS qgep_od.vw_network_node_simple CASCADE;
 CREATE TABLE qgep_od.vw_network_node_simple (
-  id TEXT PRIMARY KEY,
-  ne_id REFERENCES qgep_od.wastewater_networkelement(obj_id),
+  id SERIAL PRIMARY KEY,
+  node_type TEXT,
+  ne_id TEXT REFERENCES qgep_od.wastewater_networkelement(obj_id),
   geom geometry('POINT', 2056)
 );
 
-DELETE FROM qgep_od.vw_network_node_simple;
-
--- Insert virtual nodes for blind connections
-INSERT INTO qgep_od.vw_network_node_simple
-  SELECT rp.obj_id, r.obj_id, rp.situation_geometry
-  FROM qgep_od.reach r
-  INNER JOIN qgep_od.reach_point rp ON rp.fk_wastewater_networkelement = r.obj_id
-  GROUP BY rp.obj_id, r.obj_id, rp.situation_geometry;
-
-
- array_agg(re_branch.obj_id) as branches,
- array_agg(re_trunk.obj_id) as trunks,
- rp_to.situation_geometry
-from qgep_od.reach re_branch
- left join qgep_od.reach_point rp_to
- on re_branch.fk_reach_point_to = rp_to.obj_id
- left join qgep_od.reach re_trunk
- on re_trunk.obj_id = rp_to.fk_wastewater_networkelement
- where re_trunk.obj_id is not null
- group by situation_geometry;
-
-
-
 DROP TABLE IF EXISTS qgep_od.vw_network_edge_simple CASCADE;
 CREATE TABLE qgep_od.vw_network_edge_simple (
-  id TEXT PRIMARY KEY,
-  node_from TEXT REFERENCES qgep_od.vw_network_node_simple(id),
-  node_to TEXT REFERENCES qgep_od.vw_network_node_simple(id),
-  geom geometry('LINESTRING', 2056)
+  id SERIAL PRIMARY KEY,
+  from_node INT REFERENCES qgep_od.vw_network_node_simple(id),
+  to_node INT REFERENCES qgep_od.vw_network_node_simple(id),
+  geom geometry('POINT', 2056)
 );
-
 
 CREATE OR REPLACE FUNCTION qgep_od.refresh_network_simple() RETURNS void AS $body$
 BEGIN
-  /* Empty the tables */
-  DELETE FROM qgep_od.vw_network_edge_simple;
+
   DELETE FROM qgep_od.vw_network_node_simple;
+  DELETE FROM qgep_od.vw_network_edge_simple;
 
-  /* CORRECT ??? APPRAOCH : wastewaterelements are nodes (incl. reaches) */
-  -- Add reaches and waswater_nodes (as nodes)
-  INSERT INTO qgep_od.vw_network_node_simple (id, geom)
-  SELECT obj_id, ST_Force2D(ST_MakeLine(situation_geometry, situation_geometry)) -- we reprsent points as lines with identical start and endpoint to have more homogeneous data
-  FROM qgep_od.wastewater_node n
-  UNION
-  SELECT obj_id, ST_CurveToLine(ST_Force2D(progression_geometry))
-  FROM qgep_od.reach n;
+  INSERT INTO qgep_od.vw_network_node_simple(node_type, ne_id, geom)
+  SELECT DISTINCT * FROM (
+    
+    -- Insert nodes for wastewater nodes
+    SELECT
+      'wastewater_node',
+      n.obj_id,
+      ST_Force2D(n.situation_geometry)
+    FROM qgep_od.wastewater_node n
 
-  -- Connect the reaches FROMs (using edges)
-  INSERT INTO qgep_od.vw_network_edge_simple (id, node_from, node_to)
-  SELECT rp.obj_id, rp.fk_wastewater_networkelement, r.obj_id
-  FROM qgep_od.reach_point rp
-  JOIN qgep_od.reach r ON r.fk_reach_point_from = rp.obj_id;
+    UNION
 
-  -- Connect the reaches TOs (using edges)
-  INSERT INTO qgep_od.vw_network_edge_simple (id, node_from, node_to)
-  SELECT rp.obj_id, r.obj_id, rp.fk_wastewater_networkelement
-  FROM qgep_od.reach_point rp
-  JOIN qgep_od.reach r ON r.fk_reach_point_to = rp.obj_id;
+    -- Insert reachpoints
+    SELECT
+      'reachpoint',
+      r.obj_id,
+      ST_Force2D(rp.situation_geometry)
+    FROM qgep_od.reach_point rp
+    JOIN qgep_od.reach r ON rp.obj_id = r.fk_reach_point_from OR rp.obj_id = r.fk_reach_point_to
 
-  -- Update the edges geometry
-  UPDATE qgep_od.vw_network_edge_simple e1
-  SET geom = 
-      -- segment, between the A's endpoint to closest point on B
-      ST_ShortestLine( 
-        ST_EndPoint(n1.geom),
-        n2.geom
-      )
-      -- segment from the closest point on B to B's endpoint
-      -- ST_Line_Substring(
-      --   n2.geom,
-      --   ST_LineLocatePoint(
-      --     n2.geom,
-      --     ST_EndPoint(n1.geom)
-      --   ),
-      --   1.0
-      -- )
-  
-  FROM qgep_od.vw_network_edge_simple e2
-  JOIN qgep_od.vw_network_node_simple n1 ON e2.node_from = n1.id
-  JOIN qgep_od.vw_network_node_simple n2 ON e2.node_to = n2.id
-  WHERE e1.id = e2.id;
+    UNION
 
-  /* NAIVE APPROACH : reaches are edges
-  -- Add reachpoints (as nodes)
-  INSERT INTO qgep_od.vw_network_node_simple (id, geom)
-  SELECT obj_id, ST_Force2D(situation_geometry) FROM qgep_od.reach_point;
+    -- Insert virtual nodes for blind connections
+    SELECT
+      'reachpoint',
+      r.obj_id,
+      ST_Force2D(rp.situation_geometry)
+    FROM qgep_od.reach r
+    INNER JOIN qgep_od.reach_point rp ON rp.fk_wastewater_networkelement = r.obj_id
+    WHERE ST_LineLocatePoint(ST_CurveToLine(r.progression_geometry), rp.situation_geometry) NOT IN (0.0, 1.0) -- if exactly at start or at end, we don't need a virtualnode as we have the reachpoint
 
-  -- Add wastewaternodes (as nodes)
-  INSERT INTO qgep_od.vw_network_node_simple (id, geom)
-  SELECT obj_id, ST_Force2D(situation_geometry) FROM qgep_od.wastewater_node;
+  ) nodes;
 
-  -- Add reaches (as edges, between reachpoints)
-  INSERT INTO qgep_od.vw_network_edge_simple (id, node_from, node_to)
-  SELECT obj_id, fk_reach_point_from, fk_reach_point_to FROM qgep_od.reach;
-  
-  -- Add reachpoints connections (as edges, between reachpoints and wasterwater nodes)
-  INSERT INTO qgep_od.vw_network_edge_simple (id, node_from, node_to)
-  SELECT obj_id, obj_id, fk_wastewater_networkelement FROM qgep_od.reach_point;
-  */
+  -- Insert reaches
+  INSERT INTO qgep_od.vw_network_edge_simple (from_node, to_node, geom)
+  SELECT sub2.node_id_1,
+         sub2.node_id_2,
+         ST_Line_Substring(
+           ST_CurveToLine(progression_geometry), ratio_1, ratio_2
+         )
+  FROM (
+    -- This subquery uses LAG to combine a node with the next on a reach.
+    SELECT LAG(sub1.node_id) OVER (PARTITION BY sub1.obj_id ORDER BY sub1.ratio) as node_id_1,
+           sub1.node_id as node_id_2,
+           sub1.progression_geometry,
+           LAG(sub1.ratio) OVER (PARTITION BY sub1.obj_id ORDER BY sub1.ratio) as ratio_1,
+           sub1.ratio as ratio_2
+    FROM (
+        -- This subquery selects joins node to reach, with "ratio" being the position of the node along the reach
+        SELECT r.obj_id,
+               r.progression_geometry,
+               n.id as node_id,
+               ST_LineLocatePoint(ST_CurveToLine(r.progression_geometry), n.geom) AS ratio
+        FROM qgep_od.reach r
+        JOIN qgep_od.vw_network_node_simple n ON n.ne_id = r.obj_id
+    ) AS sub1
+  ) AS sub2
+  WHERE ratio_1 is not NULL;
 
   /*
+  DEBUGDEBUG
+  SELECT obj_id, sub2.node_id_1,
+         sub2.node_id_2,
+         ratio_1,
+         ratio_2,
+         ST_Line_Substring(
+           ST_CurveToLine(progression_geometry), ratio_1, ratio_2
+         ),
+         ST_GeometryType(ST_Line_Substring(
+           ST_CurveToLine(progression_geometry), ratio_1, ratio_2
+         )) as geomtype
+  FROM (
+    -- This subquery uses LAG to combine a node with the next on a reach.
+    SELECT obj_id,
+           LAG(sub1.node_id) OVER (PARTITION BY sub1.obj_id ORDER BY sub1.ratio) as node_id_1,
+           sub1.node_id as node_id_2,
+           sub1.progression_geometry,
+           LAG(sub1.ratio) OVER (PARTITION BY sub1.obj_id ORDER BY sub1.ratio) as ratio_1,
+           sub1.ratio as ratio_2
+    FROM (
+        -- This subquery selects joins node to reach, with "ratio" being the position of the node along the reach
+        SELECT r.obj_id,
+               r.progression_geometry,
+               n.id as node_id,
+               ST_LineLocatePoint(ST_CurveToLine(r.progression_geometry), n.geom) AS ratio
+        FROM qgep_od.reach r
+        JOIN qgep_od.vw_network_node_simple n ON n.ne_id = r.obj_id
+    ) AS sub1
+  ) AS sub2
+  WHERE ratio_1 is not null and ST_GeometryType(ST_Line_Substring(
+           ST_CurveToLine(progression_geometry), ratio_1, ratio_2
+         )) <> 'ST_LineString';
+         */
 
-  select
- array_agg(re_branch.obj_id) as branches,
- array_agg(re_trunk.obj_id) as trunks,
- rp_to.situation_geometry
-from qgep_od.reach re_branch
- left join qgep_od.reach_point rp_to
- on re_branch.fk_reach_point_to = rp_to.obj_id
- left join qgep_od.reach re_trunk
- on re_trunk.obj_id = rp_to.fk_wastewater_networkelement
- where re_trunk.obj_id is not null
- group by situation_geometry;
- */
+--        LAG(ratio) OVER (PARTITION BY r.obj_id ORDER BY ratio)
+
 END;
 $body$
 LANGUAGE plpgsql;
-
 
 SELECT qgep_od.refresh_network_simple();
