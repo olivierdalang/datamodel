@@ -22,7 +22,7 @@ CREATE TABLE qgep_network.segment (
   geom geometry('LINESTRING', 2056)
 );
 
-CREATE OR REPLACE FUNCTION qgep_od.refresh_network_simple() RETURNS void AS $body$
+CREATE OR REPLACE FUNCTION qgep_network.refresh_network_simple() RETURNS void AS $body$
 BEGIN
 
   DELETE FROM qgep_network.node;
@@ -133,7 +133,7 @@ $body$
 LANGUAGE plpgsql;
 
 
-
+/*
 -- Retro-compatbility views
 DROP MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_node CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_segment CASCADE;
@@ -157,3 +157,4 @@ SELECT s.id as gid,
 FROM qgep_network.node s
 LEFT JOIN qgep_od.reach_point rp ON rp_id = rp.obj_id
 LEFT JOIN qgep_od.wastewater_networkelement ne ON ne_id = ne.obj_id;
+*/

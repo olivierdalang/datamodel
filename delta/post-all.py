@@ -24,6 +24,8 @@ class CreateViews(DeltaPy):
         # refresh network views
         conn = psycopg2.connect("service={0}".format(self.pg_service))
         cursor = conn.cursor()
-        cursor.execute('SELECT qgep_od.refresh_network_simple();')
+        cursor.execute('REFRESH MATERIALIZED view qgep_od.vw_network_node;')
+        cursor.execute('REFRESH MATERIALIZED view qgep_od.vw_network_segment;')
+        cursor.execute('SELECT qgep_network.refresh_network_simple();')
         conn.commit()
         conn.close()
