@@ -9,29 +9,30 @@ CREATE SCHEMA qgep_network;
 CREATE TABLE qgep_network.node (
   id SERIAL PRIMARY KEY,
   node_type TEXT,
-  ne_id TEXT NULL REFERENCES qgep_od.wastewater_networkelement(obj_id), -- for reachpoints, this will reference the reach object
+  ne_id TEXT NULL REFERENCES qgep_od.wastewater_networkelement(obj_id), -- reference to the network element (this will reference the reach object for reachpoints)
   rp_id TEXT NULL REFERENCES qgep_od.reach_point(obj_id), -- will only be set for reachpoints
   geom geometry('POINT', 2056)
 );
 
 CREATE TABLE qgep_network.segment (
   id SERIAL PRIMARY KEY,
+  segment_type TEXT,
   from_node INT REFERENCES qgep_network.node(id),
   to_node INT REFERENCES qgep_network.node(id),
-  ne_id TEXT NULL REFERENCES qgep_od.wastewater_networkelement(obj_id), -- will only be set for segments corresponding to reaches
+  ne_id TEXT NULL REFERENCES qgep_od.wastewater_networkelement(obj_id), -- reference to the network element (will only be set for segments corresponding to reaches)
   geom geometry('LINESTRING', 2056)
 );
 
 CREATE OR REPLACE FUNCTION qgep_network.refresh_network_simple() RETURNS void AS $body$
 BEGIN
 
-  DELETE FROM qgep_network.node;
-  DELETE FROM qgep_network.segment;
+  TRUNCATE qgep_network.segment CASCADE;
+  TRUNCATE qgep_network.node CASCADE;
 
   -- Insert nodes for wastewater nodes
   INSERT INTO qgep_network.node(node_type, ne_id, geom)    
   SELECT
-    'wastewater node',
+    'wastewater_node',
     n.obj_id,
     ST_Force2D(n.situation_geometry)
   FROM qgep_od.wastewater_node n;
@@ -50,7 +51,7 @@ BEGIN
   -- INSERT INTO qgep_network.node(node_type, ne_id, description, geom)
   INSERT INTO qgep_network.node(node_type, ne_id, geom)
   SELECT DISTINCT
-    'blind connection',
+    'blind_connection',
     r.obj_id,
     ST_ClosestPoint(r.progression_geometry, rp.situation_geometry)
   FROM qgep_od.reach r
@@ -58,8 +59,9 @@ BEGIN
   WHERE ST_LineLocatePoint(ST_CurveToLine(r.progression_geometry), rp.situation_geometry) NOT IN (0.0, 1.0); -- if exactly at start or at end, we don't need a virtualnode as we have the reachpoint
 
   -- Insert reaches, subdivided according to blind reaches
-  INSERT INTO qgep_network.segment (from_node, to_node, ne_id, geom)
-  SELECT sub2.node_id_1,
+  INSERT INTO qgep_network.segment (segment_type, from_node, to_node, ne_id, geom)
+  SELECT 'reach',
+         sub2.node_id_1,
          sub2.node_id_2,
          obj_id,
          ST_Line_Substring(
@@ -86,8 +88,9 @@ BEGIN
   WHERE ratio_1 IS NOT NULL AND ratio_1 <> ratio_2;
 
   -- Insert edge between reachpoint (from) to the closest node belonging to the wasterwater network element
-  INSERT INTO qgep_network.segment (from_node, to_node, geom)
+  INSERT INTO qgep_network.segment (segment_type, from_node, to_node, geom)
   SELECT DISTINCT ON(n1.id)
+         'junction',
          n2.id,
          n1.id,
          ST_MakeLine(n2.geom, n1.geom)
@@ -106,8 +109,9 @@ BEGIN
   ORDER BY n1.id, ST_Distance(n1.geom, n2.geom);
 
   -- Insert edge between reachpoint (to) to the closest node belonging to the wasterwater network element
-  INSERT INTO qgep_network.segment (from_node, to_node, geom)
+  INSERT INTO qgep_network.segment (segment_type, from_node, to_node, geom)
   SELECT DISTINCT ON(n1.id)
+         'junction',
          n1.id,
          n2.id,
          ST_MakeLine(n1.geom, n2.geom)
@@ -133,28 +137,43 @@ $body$
 LANGUAGE plpgsql;
 
 
-/*
+
 -- Retro-compatbility views
-DROP MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_node CASCADE;
-DROP MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_segment CASCADE;
+ALTER MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_node RENAME TO vw_network_node_legacy;
+ALTER MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_segment RENAME TO vw_network_segment_legacy;
+
+DROP MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_segment;
+DROP MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_node;
+
+CREATE MATERIALIZED VIEW qgep_od.vw_network_node AS
+SELECT s.id as gid,
+       CASE
+         WHEN node_type = 'reachpoint' THEN s.rp_id
+         WHEN node_type = 'wasterwater_node' THEN s.ne_id
+         ELSE s.ne_id || '-BLIND-' || row_number() OVER (PARTITION BY s.node_type, s.ne_id ORDER BY ST_X(s.geom)) 
+       END AS obj_id,
+       node_type as type,
+       s.geom AS situation_geometry,
+       CASE
+         WHEN node_type = 'reachpoint' THEN rp.identifier
+         WHEN node_type = 'wasterwater_node' THEN ne.identifier
+         ELSE ne.identifier || '-BLIND-' || row_number() OVER (PARTITION BY s.node_type, s.ne_id ORDER BY ST_X(s.geom))
+       END AS description
+FROM qgep_network.node s
+LEFT JOIN qgep_od.reach_point rp ON rp_id = rp.obj_id
+LEFT JOIN qgep_od.wastewater_networkelement ne ON ne_id = ne.obj_id;
 
 CREATE MATERIALIZED VIEW qgep_od.vw_network_segment AS
 SELECT s.id as gid,
        s.geom AS progression_geometry,
        ne_id AS obj_id,
        CASE WHEN ne_id IS NOT NULL THEN 'reach' ELSE 'connection' END AS type,
-       from_node AS from_obj_id,
-       to_node AS to_obj_id,
+       n1.obj_id AS from_obj_id,
+       n2.obj_id AS to_obj_id,
        ST_Length(geom) AS length_calc
-FROM qgep_network.segment s;
+       NULL AS from_obj_id_interpolate,
+       NULL AS to_obj_id_interpolate,
+FROM qgep_network.segment s
+JOIN qgep_od.vw_network_node n1 ON n1.gid = s.from_node
+JOIN qgep_od.vw_network_node n2 ON n2.gid = s.to_node;
 
-CREATE MATERIALIZED VIEW qgep_od.vw_network_node AS
-SELECT s.id as gid,
-       COALESCE(rp_id, ne_id) as obj_id,
-       node_type as type,
-       s.geom AS situation_geometry,
-       COALESCE(rp.identifier, ne.identifier || CASE WHEN node_type = 'blind connection' THEN '-BC' ELSE '' END) AS description
-FROM qgep_network.node s
-LEFT JOIN qgep_od.reach_point rp ON rp_id = rp.obj_id
-LEFT JOIN qgep_od.wastewater_networkelement ne ON ne_id = ne.obj_id;
-*/
