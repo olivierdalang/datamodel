@@ -1,14 +1,15 @@
 -- Views for network following with the Python NetworkX module and the QGEP Python plugins
 
 /*
-This generates a graph reprensenting the network.
+This generates a graph representing the network.
+It also provides backwards-compatible views for the plugin.
 */
 
 CREATE SCHEMA qgep_network;
 
 CREATE TABLE qgep_network.node (
   id SERIAL PRIMARY KEY,
-  node_type TEXT,
+  node_type TEXT, -- one of wasterwater_node, reachpoint or blind_connection
   ne_id TEXT NULL REFERENCES qgep_od.wastewater_networkelement(obj_id), -- reference to the network element (this will reference the reach object for reachpoints)
   rp_id TEXT NULL REFERENCES qgep_od.reach_point(obj_id), -- will only be set for reachpoints
   geom geometry('POINT', 2056)
@@ -16,7 +17,7 @@ CREATE TABLE qgep_network.node (
 
 CREATE TABLE qgep_network.segment (
   id SERIAL PRIMARY KEY,
-  segment_type TEXT,
+  segment_type TEXT, -- either reach (if it's a reach segment) or junction (if it represents junction from/to a reachpoint)
   from_node INT REFERENCES qgep_network.node(id),
   to_node INT REFERENCES qgep_network.node(id),
   ne_id TEXT NULL REFERENCES qgep_od.wastewater_networkelement(obj_id), -- reference to the network element (will only be set for segments corresponding to reaches)
@@ -29,8 +30,8 @@ BEGIN
   TRUNCATE qgep_network.segment CASCADE;
   TRUNCATE qgep_network.node CASCADE;
 
-  -- Insert nodes for wastewater nodes
-  INSERT INTO qgep_network.node(node_type, ne_id, geom)    
+  -- Insert wastewater nodes
+  INSERT INTO qgep_network.node(node_type, ne_id, geom)
   SELECT
     'wastewater_node',
     n.obj_id,
@@ -48,7 +49,6 @@ BEGIN
   JOIN qgep_od.reach r ON rp.obj_id = r.fk_reach_point_from OR rp.obj_id = r.fk_reach_point_to;
 
   -- Insert virtual nodes for blind connections
-  -- INSERT INTO qgep_network.node(node_type, ne_id, description, geom)
   INSERT INTO qgep_network.node(node_type, ne_id, geom)
   SELECT DISTINCT
     'blind_connection',
@@ -95,7 +95,7 @@ BEGIN
          n1.id,
          ST_MakeLine(n2.geom, n1.geom)
   FROM (
-    
+
     SELECT
       rp.obj_id as rp_obj_id,
       rp.fk_wastewater_networkelement as wwne_id
@@ -116,7 +116,7 @@ BEGIN
          n2.id,
          ST_MakeLine(n1.geom, n2.geom)
   FROM (
-    
+
     SELECT
       rp.obj_id as rp_obj_id,
       rp.fk_wastewater_networkelement as wwne_id
@@ -137,14 +137,10 @@ $body$
 LANGUAGE plpgsql;
 
 
--- Retro-compatbility views
+-- Retro-compatbility views, compatible with previous implementation.
 
--- TODO : remove legacy views
-ALTER MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_node RENAME TO vw_network_node_legacy;
-ALTER MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_segment RENAME TO vw_network_segment_legacy;
-
-DROP MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_segment;
 DROP MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_node;
+DROP MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_segmen;
 
 CREATE MATERIALIZED VIEW qgep_od.vw_network_node AS
 WITH cover_levels_per_network_element AS (
@@ -160,7 +156,7 @@ SELECT s.id as gid,
        CASE
          WHEN node_type = 'reachpoint' THEN s.rp_id
          WHEN node_type = 'wasterwater_node' THEN s.ne_id
-         ELSE s.ne_id || '-BLIND-' || row_number() OVER (PARTITION BY s.node_type, s.ne_id ORDER BY ST_X(s.geom)) 
+         ELSE s.ne_id || '-BLIND-' || row_number() OVER (PARTITION BY s.node_type, s.ne_id ORDER BY ST_X(s.geom))
        END AS obj_id,
        node_type as type,
        s.geom AS situation_geometry,
@@ -196,4 +192,3 @@ FROM qgep_network.segment s
 JOIN qgep_od.vw_network_node n1 ON n1.gid = s.from_node
 JOIN qgep_od.vw_network_node n2 ON n2.gid = s.to_node
 LEFT JOIN qgep_od.reach r ON r.obj_id = s.ne_id;
-
