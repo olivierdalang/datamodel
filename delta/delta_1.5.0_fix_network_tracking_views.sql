@@ -137,8 +137,9 @@ $body$
 LANGUAGE plpgsql;
 
 
-
 -- Retro-compatbility views
+
+-- TODO : remove legacy views
 ALTER MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_node RENAME TO vw_network_node_legacy;
 ALTER MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_segment RENAME TO vw_network_segment_legacy;
 
@@ -146,6 +147,15 @@ DROP MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_segment;
 DROP MATERIALIZED VIEW IF EXISTS qgep_od.vw_network_node;
 
 CREATE MATERIALIZED VIEW qgep_od.vw_network_node AS
+WITH cover_levels_per_network_element AS (
+  SELECT ne.obj_id,
+         MAX(level) as level
+  FROM qgep_od.cover co
+  JOIN qgep_od.structure_part sp ON co.obj_id = sp.obj_id
+  JOIN qgep_od.wastewater_structure ws ON sp.fk_wastewater_structure = ws.obj_id
+  JOIN qgep_od.wastewater_networkelement ne ON ws.obj_id = ne.fk_wastewater_structure
+  GROUP BY ne.obj_id
+)
 SELECT s.id as gid,
        CASE
          WHEN node_type = 'reachpoint' THEN s.rp_id
@@ -158,22 +168,32 @@ SELECT s.id as gid,
          WHEN node_type = 'reachpoint' THEN rp.identifier
          WHEN node_type = 'wasterwater_node' THEN ne.identifier
          ELSE ne.identifier || '-BLIND-' || row_number() OVER (PARTITION BY s.node_type, s.ne_id ORDER BY ST_X(s.geom))
-       END AS description
+       END AS description,
+       rp.level as level,
+       n.bottom_level as bottom_level,
+       co.level as cover_level
 FROM qgep_network.node s
 LEFT JOIN qgep_od.reach_point rp ON rp_id = rp.obj_id
-LEFT JOIN qgep_od.wastewater_networkelement ne ON ne_id = ne.obj_id;
+LEFT JOIN qgep_od.wastewater_networkelement ne ON ne_id = ne.obj_id
+LEFT JOIN qgep_od.wastewater_node n ON ne_id = n.obj_id
+LEFT JOIN cover_levels_per_network_element co ON ne_id = co.obj_id AND node_type = 'wastewater_node';
 
 CREATE MATERIALIZED VIEW qgep_od.vw_network_segment AS
 SELECT s.id as gid,
        s.geom AS progression_geometry,
-       ne_id AS obj_id,
-       CASE WHEN ne_id IS NOT NULL THEN 'reach' ELSE 'connection' END AS type,
+       COALESCE(ne_id, '') AS obj_id, -- plugin can't pickle QVariant NULLs
+       s.segment_type AS type,
        n1.obj_id AS from_obj_id,
        n2.obj_id AS to_obj_id,
-       ST_Length(geom) AS length_calc
-       NULL AS from_obj_id_interpolate,
-       NULL AS to_obj_id_interpolate,
+       n1.obj_id AS from_obj_id_interpolate,
+       n2.obj_id AS to_obj_id_interpolate,
+       0 AS from_pos,
+       1 AS to_pos,
+       ST_Length(geom) AS length_calc,
+       r.clear_height AS clear_height,
+       s.geom AS detail_geometry
 FROM qgep_network.segment s
 JOIN qgep_od.vw_network_node n1 ON n1.gid = s.from_node
-JOIN qgep_od.vw_network_node n2 ON n2.gid = s.to_node;
+JOIN qgep_od.vw_network_node n2 ON n2.gid = s.to_node
+LEFT JOIN qgep_od.reach r ON r.obj_id = s.ne_id;
 
