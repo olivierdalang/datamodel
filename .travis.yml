@@ -70,5 +70,8 @@ script:
   - export PGSERVICE=qgep_prod
   - nosetests -e test_views.py
 
+after_failure:
+  - df -h
+
 after_success:
   - ./.deploy/create-release.py
